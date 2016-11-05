@@ -18,19 +18,21 @@ draw horizontalResolution verticalResolution w@World{state}
 
 -- draw while playing
 drawPlaying :: World -> Picture
-drawPlaying World{player, asteroids, bullets, stars}
+drawPlaying World{player, asteroids, bullets, stars, particles}
     = pictures ([drawMe player] ++ 
                 map drawMe asteroids ++
                 map drawMe bullets ++
                 map drawMe stars ++
+                map drawMe particles ++
                 [borderPicture])
 
 -- draw game over screen
 drawDead :: World -> Picture
-drawDead World{asteroids, bullets, stars}
+drawDead World{asteroids, bullets, stars, particles}
     = pictures (map drawMe asteroids ++
                 map drawMe bullets ++ 
                 map drawMe stars ++
+                map drawMe particles ++
                 [borderPicture])
 -- gameDraw :: [GameObject] -> Picture
 -- gameDraw objs = pictures (map drawObject objs)

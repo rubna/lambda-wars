@@ -24,26 +24,29 @@ timeHandler time w@World{state}
     | state == Dead    = deadStep w
       
 playingStep :: World -> World
-playingStep w@(World{state, player, asteroids, bullets, stars}) = 
+playingStep w@(World{state, player, asteroids, bullets, stars, particles}) = 
     checkKilled
-    (timeOutBullets
-    (spawnStars (50 - length stars) 
+    (timeOutInstances
+    (spawnStars (100 - length stars) 
     (spawnAsteroids (7 - length asteroids) 
     (shootAsteroids
+    (playerTrail
     (shoot player w{
         player    = step w player, 
         asteroids = map (step w) asteroids, 
         bullets   = map (step w) bullets,
-        stars   = map (step w) stars
-    })))))
+        stars   = map (step w) stars,
+        particles   = map (step w) particles
+    }))))))
 
 deadStep :: World -> World
-deadStep w@(World{state, asteroids, bullets, stars}) = 
-      start
-      (timeOutBullets 
+deadStep w@(World{state, asteroids, bullets, stars, particles}) = 
+      startGame
+      (timeOutInstances 
       (spawnAsteroids (7 - length asteroids)
       w {
             asteroids = map (step w) asteroids, 
             bullets   = map (step w) bullets,
-            stars   = map (step w) stars
+            stars   = map (step w) stars,
+        particles   = map (step w) particles
       }))

@@ -21,7 +21,8 @@ data World = World {
         player           :: Player,
         asteroids        :: [Asteroid],
         bullets          :: [Bullet],
-        stars            :: [Star]
+        stars            :: [Star],
+        particles        :: [Particle]
     }
     
 data RotateAction   = NoRotation | RotateLeft | RotateRight
@@ -33,7 +34,7 @@ data GameState      = Playing    | Dead
     deriving Eq
 
 initial :: Int -> World
-initial seed = World (mkStdGen seed) Playing NoRotation NoMovement DontShoot 1 newPlayer [] [] []
+initial seed = World (mkStdGen seed) Playing NoRotation NoMovement DontShoot 1 newPlayer [] [] [] []
 
 randomRange :: World -> (Float, Float) -> ([Float], World)
 randomRange w@World{rndGen} range = (result, w{rndGen = newSeed})
@@ -50,20 +51,22 @@ shootAsteroids w@World{bullets, asteroids} = w{asteroids = snd newLists,
 doHitting :: ([Bullet], [Asteroid]) -> ([Bullet], [Asteroid]) -> ([Bullet], [Asteroid])
 doHitting (clearBullets, clearAsteroids) (bs, []) = (clearBullets ++ bs, clearAsteroids)  --we've checked for all asteroids
 doHitting (clearBullets, clearAsteroids) ([], a:as) = doHitting ([], clearAsteroids ++ [a]) (clearBullets, as) --this asteroid wasn't hit! phew
-doHitting (clearBullets, clearAsteroids)  ((b:bs), (a:as)) | checkBulletCollision b a = doHitting ([], []) (clearBullets ++ bs, clearAsteroids ++ explodeAsteroid a ++ as) -- hit!! check next asteroid, leaving the bullet and the current asteroid out
+doHitting (clearBullets, clearAsteroids)  ((b:bs), (a:as)) | checkBulletCollision b a = doHitting ([], []) (clearBullets ++ bs, clearAsteroids ++ (explodeAsteroid a 0) ++ as) -- hit!! check next asteroid, leaving the bullet and the current asteroid out
                                                            | otherwise          = doHitting(clearBullets ++ [b], clearAsteroids) (bs, a:as) -- this bullet didn't hit the asteroid~! check next bullet
 
 -- splits an asteroid in two smaller ones if its size > 1
-explodeAsteroid :: Asteroid -> [Asteroid]
-explodeAsteroid Asteroid{positionAs, sizeAs} | sizeAs == 1 = []
-                                             | otherwise   = [newAsteroid positionAs (-0.5, 0.2) (sizeAs - 1), newAsteroid positionAs (0.5, -0.1) (sizeAs - 1)]
+explodeAsteroid :: Asteroid -> Float -> [Asteroid]
+explodeAsteroid Asteroid{positionAs, sizeAs} hitDir | sizeAs == 1 = []
+                                                    | otherwise   = [newAsteroid positionAs (toCartesian (1, hitDir + 90)) (sizeAs - 1), 
+                                                                     newAsteroid positionAs (toCartesian (1, hitDir - 90)) (sizeAs - 1)]
 
 -- checks if there's collision between a Bullet and an Asteroid
 checkBulletCollision :: Bullet -> Asteroid -> Bool
 checkBulletCollision a b = magV((getPosition b) - (getPosition a)) < (getRadius b + getRadius a)
 
 checkKilled :: World -> World
-checkKilled w@World{player, asteroids} | any (==True) (map (checkPlayerCollision player) asteroids) = w{state = Dead} 
+checkKilled w@World{player, asteroids} | any (==True) (map (checkPlayerCollision player) asteroids) = 
+                                                emitParticles 20 (getPosition player) 3 w{state = Dead}
                                        | otherwise = w
 
 -- checks if Player collided with an Asteroid
@@ -81,10 +84,47 @@ shoot Player{position, rotation} w@World{bullets, shootAction, shootTimer} =
                     newShootTimer | shot = 0
                                   | otherwise = min 1 (shootTimer + 0.05)
 
--- start handler
-start :: World -> World
-start w@World{shootAction} | shootAction == Shoot = w{state = Playing, shootTimer = 0, player = newPlayer}
-                           | otherwise = w
+-- player trail particles
+playerTrail :: World -> World
+playerTrail w@World{player, movementAction} = trail movementAction
+                where trail Thrust = emitParticles 1 (getPosition player - toCartesian(4, getRotation player)) 1 w
+                      trail NoMovement = w
+
+-- emit a particle at a certain place
+emitParticles :: Int -> Vector -> Float -> World -> World
+emitParticles n pos maxSpd w@World{particles} = 
+        newWorld{
+            particles = (makeParticles n []) ++ particles
+         }
+         where  rnds = randomRange w (0, 1) -- make infinite list of random floats between 0 and 1, and a new World
+                floats = fst rnds           -- take infinite list of floats out of the tuple
+                newWorld = snd rnds         -- the new world
+                
+                makeParticles :: Int -> [Particle] -> [Particle]
+                makeParticles 0 ps = ps
+                makeParticles i ps = (newParticle pos (spd i)) : makeParticles (i - 1) ps
+                spd j = toCartesian ((floats !! (j * 2)) * maxSpd, (floats !! (j * 2 + 1)) * 360.0)  -- the random speed
+
+
+-- time out Bullets, Particles
+timeOutInstances :: World -> World
+timeOutInstances w@World{bullets, particles} = w{bullets = concatMap timeOutBullet bullets,
+                                               particles = concatMap timeOutParticle particles}
+
+-- delete a bullet if it's timed out
+timeOutBullet :: Bullet -> [Bullet]
+timeOutBullet b@Bullet{destroyTimer} | destroyTimer < 1.0 = [b]
+                                     | otherwise         = []
+-- delete a particle if it's going too slow
+timeOutParticle :: Particle -> [Particle]
+timeOutParticle p@Particle{} | (magV $ getSpeed p) > 0.1 = [p]
+                             | otherwise         = []
+
+
+-- start game handler
+startGame :: World -> World
+startGame w@World{shootAction} | shootAction == Shoot = w{state = Playing, shootTimer = 0, player = newPlayer}
+                               | otherwise = w
 
 ---------------------------------------------------  CLASS DEFINITIONS  -----------------------------------------------------
 class Moveable m where
@@ -92,6 +132,8 @@ class Moveable m where
     setPosition :: m -> Vector -> m
     getRadius :: m -> Float
     getSpeed :: m -> Vector
+    getRotation :: m -> Float
+    getRotation m = argV $ getSpeed m
     addSpeed :: m -> m                  -- add speed to position
     addSpeed m = setPosition m (getPosition m + getSpeed m)
     wrap :: m -> m                      -- wraps around a moveable
@@ -121,10 +163,11 @@ instance Moveable Player where
     getSpeed Player{speed} = speed
     setPosition p@Player{position} newPos = p{position = newPos}
     getRadius Player{radius} = radius
+    getRotation Player{rotation} = rotation
     step World{rotateAction, movementAction, shootAction} p@Player{speed, rotation} = 
         wrap $ addSpeed p 
         { 
-            speed = mulSV 0.98 (speed + acceleration movementAction),
+            speed = mulSV 0.975 (speed + acceleration movementAction),
             rotation = rotation + rotateDirection rotateAction
         }
         where   rotateDirection NoRotation = 0
@@ -191,7 +234,7 @@ data Bullet = Bullet {  positionBu  :: Vector,
                         speedBu     :: Vector,
                         rotationBu  :: Float,
                         radiusBu    :: Float,
-                        deleteTimer :: Float,
+                        destroyTimer:: Float,
                         spriteBu    :: Sprite
                      }
 -- bullet init
@@ -206,16 +249,7 @@ instance Moveable Bullet where
     setPosition b@Bullet{positionBu} newPos = b{positionBu = newPos}
     getSpeed Bullet{speedBu} = speedBu
     getRadius Bullet{radiusBu} = radiusBu
-    step _ b@Bullet{deleteTimer} = wrap $ addSpeed b{deleteTimer = deleteTimer + 0.02}
-
--- time out bullets according to their deleteTimer
-timeOutBullets :: World -> World
-timeOutBullets w@World{bullets} = w{bullets = concatMap timeOutBullet bullets}
-
--- delete a bullet if its timed out
-timeOutBullet :: Bullet -> [Bullet]
-timeOutBullet b@Bullet{deleteTimer} | deleteTimer < 1.0 = [b]
-                                    | otherwise         = []
+    step _ b@Bullet{destroyTimer} = wrap $ addSpeed b{destroyTimer = destroyTimer + 0.02}
 
 -- STAR DEFINITIONS
 data Star = Star {  positionSt  :: Vector,
@@ -228,7 +262,7 @@ instance Moveable Star where
     setPosition s@Star{positionSt} newPos = s{positionSt = newPos}
     getSpeed Star{speedSt}  = speedSt
     getRadius Star{z}       = 2 / z
-    step World{player} s@Star{speedSt, z}    = wrap $ addSpeed s{speedSt = mulSV (-1/z) (getSpeed player)}
+    step World{player} s@Star{speedSt, z}    = wrap $ addSpeed s{speedSt = mulSV (-1/(z*z)) (getSpeed player)}
 
 instance Drawable Star where
     drawMe s@Star{positionSt, spriteSt, z} = drawSprite spriteSt positionSt (2.5 / z) 0
@@ -252,3 +286,20 @@ spawnStars n w@World{stars} =
                 updateStars :: Int -> [Star] -> [Star]
                 updateStars _ [] = []
                 updateStars i (s@Star{positionSt, z}:ss)  = s{  positionSt = positions !! i, z = zs !! i} : updateStars (i+1) ss
+
+--  PARTICLE DEFINITIONS
+data Particle = Particle {  positionPa  :: Vector,
+                            speedPa     :: Vector}
+
+newParticle :: Vector -> Vector -> Particle
+newParticle pos spd = Particle pos spd
+
+instance Moveable Particle where
+    getPosition Particle{positionPa} = positionPa
+    setPosition s@Particle{positionPa} newPos = s{positionPa = newPos}
+    getSpeed Particle{speedPa} = speedPa
+    getRadius _ = 3
+    step _ p@Particle{speedPa} = addSpeed p{speedPa = mulSV 0.95 speedPa}
+
+instance Drawable Particle where
+    drawMe p@Particle{positionPa} = drawSprite starSprite positionPa 1 0 -- Translate x y (Color white (Circle getRadius p))
