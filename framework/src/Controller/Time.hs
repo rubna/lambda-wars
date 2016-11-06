@@ -24,29 +24,35 @@ timeHandler time w@World{state}
     | state == Dead    = deadStep w
       
 playingStep :: World -> World
-playingStep w@(World{state, player, asteroids, bullets, stars, particles}) = 
+playingStep w@(World{state, player, asteroids, bullets, stars, particles, ufos}) = 
     checkKilled
+    (setInvincibility player
     (timeOutInstances
-    (spawnStars (100 - length stars) 
-    (spawnAsteroids (7 - length asteroids) 
+    (checkHighScore 
+    (checkNextLevel
     (shootAsteroids
+    (shootUfos
+    (ufoSmoke ufos
     (playerTrail
     (shoot player w{
         player    = step w player, 
         asteroids = map (step w) asteroids, 
         bullets   = map (step w) bullets,
         stars   = map (step w) stars,
-        particles   = map (step w) particles
-    }))))))
+        particles   = map (step w) particles,
+        ufos   = map (step w) ufos
+    })))))))))
 
 deadStep :: World -> World
-deadStep w@(World{state, asteroids, bullets, stars, particles}) = 
-      startGame
-      (timeOutInstances 
-      (spawnAsteroids (7 - length asteroids)
-      w {
-            asteroids = map (step w) asteroids, 
-            bullets   = map (step w) bullets,
-            stars   = map (step w) stars,
-        particles   = map (step w) particles
-      }))
+deadStep w@(World{state, asteroids, bullets, stars, particles, ufos}) = 
+    startGame
+    (spawnStars (100 - length stars) 
+    (timeOutInstances 
+    w {
+        asteroids = map (step w) asteroids, 
+        bullets   = map (step w) bullets,
+        stars   = map (step w) stars,
+        particles   = map (step w) particles,
+        ufos   = map (step w) ufos,
+        lives = 3
+    }))

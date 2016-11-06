@@ -5,6 +5,7 @@ module Model where
 import System.Random
 import Graphics.Gloss
 import Graphics.Gloss.Data.Vector
+import Graphics.Gloss.Geometry.Angle
 import Sprite
 
 -- | Game state
@@ -22,7 +23,14 @@ data World = World {
         asteroids        :: [Asteroid],
         bullets          :: [Bullet],
         stars            :: [Star],
-        particles        :: [Particle]
+        particles        :: [Particle],
+        ufos             :: [Ufo],
+        score            :: Int,
+        lives            :: Int,
+        invincibility    :: Bool,
+        level            :: Int,
+        multiplier       :: Int,
+        highScore        :: Int
     }
     
 data RotateAction   = NoRotation | RotateLeft | RotateRight
@@ -34,7 +42,7 @@ data GameState      = Playing    | Dead
     deriving Eq
 
 initial :: Int -> World
-initial seed = World (mkStdGen seed) Playing NoRotation NoMovement DontShoot 1 newPlayer [] [] [] []
+initial seed = World (mkStdGen seed) Dead NoRotation NoMovement DontShoot 1 newPlayer [] [] [] [] [newUfo (10, -150)] 0 3 True 0 1 0
 
 randomRange :: World -> (Float, Float) -> ([Float], World)
 randomRange w@World{rndGen} range = (result, w{rndGen = newSeed})
@@ -44,34 +52,72 @@ randomRange w@World{rndGen} range = (result, w{rndGen = newSeed})
 --------------------------------------------------- GLOBAL EVENTS ----------------------------------------------------
 -- code for checking collision between bullets and asteroids
 shootAsteroids :: World -> World
-shootAsteroids w@World{bullets, asteroids} = w{asteroids = snd newLists,
-                                               bullets   = fst newLists}
-                                            where newLists = doHitting ([], []) (bullets, asteroids)
+shootAsteroids w@World{bullets, asteroids, score, multiplier} 
+    = w{asteroids = getAsteroids newLists,
+        bullets   = getBullets newLists,
+        score     = getScore newLists}
+            where newLists = doHitting multiplier ([], []) (bullets, asteroids, score)
+                  getBullets (b, _, _)   = b
+                  getAsteroids (_, a, _) = a
+                  getScore (_, _, s) = s
 
-doHitting :: ([Bullet], [Asteroid]) -> ([Bullet], [Asteroid]) -> ([Bullet], [Asteroid])
-doHitting (clearBullets, clearAsteroids) (bs, []) = (clearBullets ++ bs, clearAsteroids)  --we've checked for all asteroids
-doHitting (clearBullets, clearAsteroids) ([], a:as) = doHitting ([], clearAsteroids ++ [a]) (clearBullets, as) --this asteroid wasn't hit! phew
-doHitting (clearBullets, clearAsteroids)  ((b:bs), (a:as)) | checkBulletCollision b a = doHitting ([], []) (clearBullets ++ bs, clearAsteroids ++ (explodeAsteroid a 0) ++ as) -- hit!! check next asteroid, leaving the bullet and the current asteroid out
-                                                           | otherwise          = doHitting(clearBullets ++ [b], clearAsteroids) (bs, a:as) -- this bullet didn't hit the asteroid~! check next bullet
-
+doHitting ::Int -> ([Bullet], [Asteroid]) -> ([Bullet], [Asteroid], Int) -> ([Bullet], [Asteroid], Int)
+doHitting _ (clearBullets, clearAsteroids) (bs, [], curScore) = (clearBullets ++ bs, clearAsteroids, curScore)  --we've checked for all asteroids
+doHitting mult (clearBullets, clearAsteroids) ([], a:as, curScore) = doHitting mult ([], clearAsteroids ++ [a]) (clearBullets, as, curScore) --this asteroid wasn't hit! phew
+doHitting mult (clearBullets, clearAsteroids)  (b:bs, a:as, curScore) 
+                | checkBulletCollision b a = doHitting mult ([], []) (clearBullets ++ bs, clearAsteroids ++ splitAsteroid a b ++ as, curScore + mult) -- hit!! check next asteroid, leaving the bullet out and exploding the current asteroid
+                | otherwise                = doHitting mult (clearBullets ++ [b], clearAsteroids) (bs, a:as, curScore) -- this bullet didn't hit the asteroid~! check next bullet
+                    where splitAsteroid a b = explodeAsteroid a (radToDeg (argV (getPosition a - (getPosition b - getSpeed b))))
 -- splits an asteroid in two smaller ones if its size > 1
 explodeAsteroid :: Asteroid -> Float -> [Asteroid]
-explodeAsteroid Asteroid{positionAs, sizeAs} hitDir | sizeAs == 1 = []
-                                                    | otherwise   = [newAsteroid positionAs (toCartesian (1, hitDir + 90)) (sizeAs - 1), 
-                                                                     newAsteroid positionAs (toCartesian (1, hitDir - 90)) (sizeAs - 1)]
+explodeAsteroid Asteroid{positionAs, sizeAs} hitDir | sizeAs == 1 = []  -- destroy small asteroids
+                                                    | otherwise   = [newAsteroid positionAs spd s,
+                                                                     newAsteroid positionAs (-spd) s]  -- split bigger asteroids into 2 smaller ones
+                                                        where s = sizeAs - 1
+                                                              spd = toCartesian (1.0 / fromIntegral s, hitDir + 90)
+
+shootUfos :: World -> World
+shootUfos w@World{bullets, ufos} = w{ bullets = fst newLists,
+                                      ufos = snd newLists } 
+                                            where newLists = hitUfos ([], []) (bullets, ufos)
+
+hitUfos :: ([Bullet], [Ufo]) -> ([Bullet], [Ufo]) -> ([Bullet], [Ufo])
+hitUfos (clearBullets, clearUfos) (bs, []) = (clearBullets ++ bs, clearUfos) -- all ufos checked
+hitUfos (clearBullets, clearUfos) ([], u:us) = hitUfos ([], clearUfos ++ [u]) (clearBullets, us) --this ufo wasn't hit - check for remaining ufos
+hitUfos (clearBullets, clearUfos) (b:bs, u:us) | checkUfoHit b u = hitUfos ([], clearUfos ++ [hitUfo u b]) (clearBullets ++ bs, us) --ufo was hit! change affected ufo & continue
+                                               | otherwise       = hitUfos (clearBullets ++ [b], clearUfos) (bs, u:us) -- not hit -> continue
+                    where hitUfo uf@Ufo{health} bullet = uf{ health = health - 1, 
+                                                             speedUfo = getSpeed uf + mulSV 0.2 (getSpeed bullet)}
+
+-- checks if a bullet hits a UFO
+checkUfoHit :: Bullet -> Ufo -> Bool
+checkUfoHit a b = magV((getPosition b) - (getPosition a)) < (getRadius b + getRadius a)
 
 -- checks if there's collision between a Bullet and an Asteroid
 checkBulletCollision :: Bullet -> Asteroid -> Bool
 checkBulletCollision a b = magV((getPosition b) - (getPosition a)) < (getRadius b + getRadius a)
 
+-- checks if a player is hit or killed. If the player is hit but has more than 1 life,
 checkKilled :: World -> World
-checkKilled w@World{player, asteroids} | any (==True) (map (checkPlayerCollision player) asteroids) = 
-                                                emitParticles 20 (getPosition player) 3 w{state = Dead}
-                                       | otherwise = w
+checkKilled w@World{player, asteroids, lives, invincibility, ufos} 
+                                        | hit && lives == 1 = explodePlayer 50 w{state = Dead} -- game over !
+                                        | hit               = explodePlayer 15 newWorld        -- player loses a life
+                                        | otherwise = w                                        -- ...didn't get hit!
+                                       where collision = any (==True) (map (checkUfoDeath player) ufos ++
+                                                                       map (checkAsteroidDeath player) asteroids) --check if the player hit an asteroid or a UFO
+                                             hit = collision && (invincibility == False)
+                                             newWorld = w{lives = lives - 1, 
+                                                          player = player{invincibilityTimer = 0.0,                 -- set invincibilityTimer to 0
+                                                                          speed = - (mulSV 0.5 (getSpeed player))}} -- give the player a speed impulse
+                                             explodePlayer n = emitParticles n (getPosition player) 3
 
 -- checks if Player collided with an Asteroid
-checkPlayerCollision :: Player -> Asteroid -> Bool
-checkPlayerCollision a b = magV((getPosition b) - (getPosition a)) < (getRadius b + getRadius a)
+checkAsteroidDeath :: Player -> Asteroid -> Bool
+checkAsteroidDeath a b = magV((getPosition b) - (getPosition a)) < (getRadius b + getRadius a)
+
+-- checks if Player collided with a Ufo
+checkUfoDeath :: Player -> Ufo -> Bool
+checkUfoDeath a b = magV((getPosition b) - (getPosition a)) < (getRadius b + getRadius a)
 
 -- player shooting
 shoot :: Player -> World -> World
@@ -89,6 +135,14 @@ playerTrail :: World -> World
 playerTrail w@World{player, movementAction} = trail movementAction
                 where trail Thrust = emitParticles 1 (getPosition player - toCartesian(4, getRotation player)) 1 w
                       trail NoMovement = w
+
+-- ufo smoke particles
+ufoSmoke :: [Ufo] -> World -> World
+ufoSmoke [] w = w
+ufoSmoke (ufo:us) w = ufoSmoke us (smoke ufo)
+                where smoke u@Ufo{health} | health <= 0 = emitParticles 1 (getPosition ufo) 1 w
+                                          | otherwise = w
+    
 
 -- emit a particle at a certain place
 emitParticles :: Int -> Vector -> Float -> World -> World
@@ -111,6 +165,11 @@ timeOutInstances :: World -> World
 timeOutInstances w@World{bullets, particles} = w{bullets = concatMap timeOutBullet bullets,
                                                particles = concatMap timeOutParticle particles}
 
+-- keeps track of the duration of the invincibility
+setInvincibility :: Player -> World -> World
+setInvincibility Player{invincibilityTimer} w | invincibilityTimer < 15.0 = w{invincibility = True}
+                                              | otherwise                = w{invincibility = False }
+
 -- delete a bullet if it's timed out
 timeOutBullet :: Bullet -> [Bullet]
 timeOutBullet b@Bullet{destroyTimer} | destroyTimer < 1.0 = [b]
@@ -120,11 +179,27 @@ timeOutParticle :: Particle -> [Particle]
 timeOutParticle p@Particle{} | (magV $ getSpeed p) > 0.1 = [p]
                              | otherwise         = []
 
-
 -- start game handler
 startGame :: World -> World
-startGame w@World{shootAction} | shootAction == Shoot = w{state = Playing, shootTimer = 0, player = newPlayer}
+startGame w@World{shootAction} | shootAction == Shoot = spawnAsteroids 1 w{ state = Playing, 
+                                                                            shootTimer = 0, 
+                                                                            player = newPlayer, 
+                                                                            asteroids = []}
                                | otherwise = w
+
+-- check if there are any asteroids left. if not: go to the next level!
+checkNextLevel :: World -> World
+checkNextLevel w@World{asteroids, level, multiplier} 
+    | length asteroids == 0 = spawnAsteroids (level+2) w{level = level + 1, invincibility = True, multiplier = multiplier + 1}
+    | otherwise = w
+
+-- check highScore
+checkHighScore :: World -> World
+checkHighScore w@World{score, highScore} = if highScore < score then w{highScore = score} else w
+
+-- converts a vector from a polar coordinate (in degrees) to a cartesian coordinate
+toCartesian :: Vector -> Vector
+toCartesian polar = rotateV (-degToRad(snd polar)) (fst polar, 0)
 
 ---------------------------------------------------  CLASS DEFINITIONS  -----------------------------------------------------
 class Moveable m where
@@ -148,14 +223,16 @@ data Player = Player {  position :: Vector,
                         speed :: Vector,
                         rotation :: Float,
                         radius :: Float,
-                        sprite :: Sprite}
+                        invincibilityTimer :: Float}
 -- player init
 newPlayer :: Player
-newPlayer = Player (0, 0) (0, 0) 0 10 playerSprite
+newPlayer = Player (0, 0) (0, 0) (-45) 10 0
 
 -- player draw event
 instance Drawable Player where
-    drawMe p@Player{position, rotation, sprite} = drawSprite sprite position 8 rotation
+    drawMe p@Player{position, rotation, invincibilityTimer} = drawSprite sprite position 8 rotation
+                    where sprite | ((mod (floor invincibilityTimer) 2) == 0) && invincibilityTimer < 15.0 = playerInvincibleSprite
+                                 | otherwise = playerSprite
 
 -- player step event
 instance Moveable Player where
@@ -164,20 +241,18 @@ instance Moveable Player where
     setPosition p@Player{position} newPos = p{position = newPos}
     getRadius Player{radius} = radius
     getRotation Player{rotation} = rotation
-    step World{rotateAction, movementAction, shootAction} p@Player{speed, rotation} = 
+    step World{rotateAction, movementAction, shootAction} p@Player{speed, rotation, invincibilityTimer} = 
         wrap $ addSpeed p 
         { 
             speed = mulSV 0.975 (speed + acceleration movementAction),
-            rotation = rotation + rotateDirection rotateAction
+            rotation = rotation + rotateDirection rotateAction,
+            invincibilityTimer = invincibilityTimer + 0.15
         }
         where   rotateDirection NoRotation = 0
-                rotateDirection RotateLeft = -4
-                rotateDirection RotateRight = 4
+                rotateDirection RotateLeft = -6
+                rotateDirection RotateRight = 6
                 acceleration NoMovement = (0, 0)
                 acceleration Thrust = toCartesian (0.175, rotation)
-
-toCartesian :: Vector -> Vector
-toCartesian polar = rotateV (-(snd polar) * (3.14156982/ 180)) (fst polar, 0)
 
 -- ASTEROID DEFINITIONS
 data Asteroid = Asteroid {positionAs :: Vector,
@@ -205,18 +280,20 @@ spawnAsteroids n w@World{asteroids, player} =
                 -- update asteroids
                 updateAsteroid :: Int -> [Asteroid] -> [Asteroid]
                 updateAsteroid _ [] = []
-                updateAsteroid i (a@Asteroid{positionAs, speedAs}:as)  | magV (positions !! i - getPosition player) < 100 = updateAsteroid (i+1) (a:as)
-                                                                       | otherwise = a{  positionAs = positions !! i, 
-                                                                                          speedAs = speeds !! i       } : updateAsteroid (i+1) as
+                updateAsteroid i (a@Asteroid{positionAs, speedAs}:as)  | distToPlayer < 100 = updateAsteroid (i+1) (a:as) -- choose other position if too close to the player
+                                                                       | otherwise = a{ positionAs = pos, speedAs = spd } : updateAsteroid (i+1) as   -- set new asteroid position and speed, recurse
+                                                                            where pos = positions !! i
+                                                                                  spd = speeds !! i
+                                                                                  distToPlayer = magV (pos - getPosition player)
 
 instance Drawable Asteroid where
-    drawMe a@Asteroid{positionAs, rotationAs, spriteAs} = drawSprite spriteAs positionAs (getRadius a) rotationAs
+    drawMe a@Asteroid{positionAs, rotationAs, spriteAs} = drawSpriteWrapped spriteAs positionAs (getRadius a) rotationAs
 
 instance Moveable Asteroid where
     getPosition Asteroid{positionAs} = positionAs
     setPosition a@Asteroid{positionAs} newPos = a{positionAs = newPos}
     getSpeed a@Asteroid{speedAs} = speedAs
-    getRadius Asteroid{sizeAs} = fromIntegral sizeAs * 5.0
+    getRadius Asteroid{sizeAs} = fromIntegral sizeAs * 8.0
     step _ a = wrap $ addSpeed a
 
 
@@ -262,7 +339,7 @@ instance Moveable Star where
     setPosition s@Star{positionSt} newPos = s{positionSt = newPos}
     getSpeed Star{speedSt}  = speedSt
     getRadius Star{z}       = 2 / z
-    step World{player} s@Star{speedSt, z}    = wrap $ addSpeed s{speedSt = mulSV (-1/(z*z)) (getSpeed player)}
+    step World{player} s@Star{speedSt, z}    = wrap $ addSpeed s{speedSt = mulSV (-1/(z*z)) ((-2, 1))} --getSpeed player + 
 
 instance Drawable Star where
     drawMe s@Star{positionSt, spriteSt, z} = drawSprite spriteSt positionSt (2.5 / z) 0
@@ -302,4 +379,41 @@ instance Moveable Particle where
     step _ p@Particle{speedPa} = addSpeed p{speedPa = mulSV 0.95 speedPa}
 
 instance Drawable Particle where
-    drawMe p@Particle{positionPa} = drawSprite starSprite positionPa 1 0 -- Translate x y (Color white (Circle getRadius p))
+    drawMe p@Particle{positionPa} = drawSprite starSprite positionPa 1 0
+
+-- UFO DEFINITIONS
+data Ufo = Ufo { positionUfo  :: Vector,
+                 speedUfo     :: Vector,
+                 health       :: Int,
+                 repairCounter:: Float}
+
+newUfo :: Vector -> Ufo
+newUfo pos = Ufo pos (0, 0) 3 0
+
+instance Moveable Ufo where
+    getPosition Ufo{positionUfo} = positionUfo
+    setPosition u@Ufo{positionUfo} newPos = u{positionUfo = newPos}
+    getSpeed Ufo{speedUfo} = speedUfo
+    getRadius _ = 8
+    getRotation Ufo{speedUfo, health} = (fst speedUfo) * 17 + (koAngle health)
+        where koAngle 0 = 40
+              koAngle _ = 0
+    step World{player, state} u@Ufo{health, repairCounter} = 
+        addSpeed u{ speedUfo = newSpd,
+                    health = newHealth,
+                    repairCounter = newRepairCounter}
+            where toPlayer = normalizeV (getPosition player - getPosition u)
+                  toHome = normalizeV ((0, -150) - getPosition u)
+                  playingSpeed | health > 0 = mulSV 0.98 ((getSpeed u) + (mulSV 0.017 toPlayer))
+                               | otherwise  = mulSV 0.9 (getSpeed u)
+                  deadSpeed    | health > 0 = mulSV 0.98 ((getSpeed u) + (mulSV 0.02 toHome))
+                               | otherwise  = mulSV 0.9 (getSpeed u)
+                  newSpd | state == Playing = playingSpeed
+                         | state == Dead    = deadSpeed
+                  newRepairCounter | health == 0 = repairCounter + 0.0075
+                                   | otherwise   = 0
+                  newHealth | health == 0 && repairCounter >= 1 = 3
+                            | otherwise = max 0 health
+
+instance Drawable Ufo where
+    drawMe u@Ufo{positionUfo} = drawSprite ufoSprite positionUfo 12 (getRotation u)
